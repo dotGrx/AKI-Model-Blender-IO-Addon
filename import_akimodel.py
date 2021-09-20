@@ -10,11 +10,15 @@ import bmesh
 from pathlib import Path
 from bpy_extras.wm_utils.progress_report import ProgressReport
 
+
 class MDL:
  def __init__(self):
+    self.type           = 0
     self.scale          = 0
     self.vertex_count   = 0
     self.face_count     = 0
+    self.texture_size   = 0
+    self.vertex_influence = 0
     self.offsets       = []
     self.vertices      = []
     self.faces         = []
@@ -32,6 +36,17 @@ class TypeFormat:
     UInt64 = '<L'
     Single = '<f'
     Double = '<d'
+
+
+def color_srgb_to_scene_linear(c):
+    if c < 0.04045:
+        return 0.0 if c < 0.0 else c * (1.0 / 12.92)
+    else:
+        return ((c + 0.055) * (1.0 / 1.055)) ** 2.4
+
+def hex_to_rgb(rgb_str):    
+    int_tuple = struct.unpack('BBB', bytes.fromhex(rgb_str))    
+    return tuple([val/255 for val in int_tuple])  
 
 def veckey2d(v):
     return round(v[0], 4), round(v[1], 4)
@@ -54,10 +69,17 @@ def load(context,
             mesh = MDL()
             
             mesh.scale          = int.from_bytes(f.read(1), "little");
-            mesh.vertex_count   = int.from_bytes(f.read(1), "little");
-            mesh.face_count     = int.from_bytes(f.read(1), "little");
-            f.read(1)
-        
+
+            # meshes without scale are read differently
+            if mesh.scale > 0:
+                mesh.type = 1
+            else:
+                mesh.scale += 1
+            
+            mesh.vertex_count       = (int.from_bytes(f.read(1), "little") & 0x7F);
+            mesh.face_count         = int.from_bytes(f.read(1), "little");
+            mesh.vertex_influence   = int.from_bytes(f.read(1), "little");
+
             # Offset translate
             scaleIToF = 0.1
 
@@ -65,11 +87,19 @@ def load(context,
             ofsX = round(((struct.unpack(TypeFormat.SByte, f.read(1))[0]) * scaleIToF), 4)
             ofsY = round(((struct.unpack(TypeFormat.SByte, f.read(1))[0]) * scaleIToF), 4)
             ofsZ = round(((struct.unpack(TypeFormat.SByte, f.read(1))[0]) * scaleIToF), 4)
-            f.read(1)
 
             offset_array.append([ofsX, ofsY, ofsZ])
-    
-            # correct the scale for verts
+
+
+            test = 0x37 - 0x80
+            print("HERE : ", 0x37 - 0x80)
+
+            print("KEK :", test & 0x7F)
+
+            # assumed?
+            mesh.texture_size = int.from_bytes(f.read(1), "little");
+
+             # correct the scale for verts
             scaleIToF = 1.0 / mesh.scale
 
             vert_array = []
@@ -80,37 +110,60 @@ def load(context,
             # extrapolate the verts
             for v in range(0, mesh.vertex_count) :
 
-                # vertex
-                vtX = round(((struct.unpack(TypeFormat.SByte, f.read(1))[0])* scaleIToF), 4)
-                vtY = round(((struct.unpack(TypeFormat.SByte, f.read(1))[0])* scaleIToF), 4)
-                vtZ = round(((struct.unpack(TypeFormat.SByte, f.read(1))[0])* scaleIToF), 4)
-                vert_array.append([vtX, vtY, vtZ])
+                if mesh.type >= 1:
+                    # vertex
+                    vtX = round(((struct.unpack(TypeFormat.SByte, f.read(1))[0])* scaleIToF), 4)
+                    vtY = round(((struct.unpack(TypeFormat.SByte, f.read(1))[0])* scaleIToF), 4)
+                    vtZ = round(((struct.unpack(TypeFormat.SByte, f.read(1))[0])* scaleIToF), 4)
+                    vert_array.append([vtX, vtY, vtZ])
 
-                if has_vertex_colours :
+                    if has_vertex_colours :
+                        # move to UVs
+                        aU = (float(struct.unpack(TypeFormat.Byte, f.read(1))[0]) / int(width_texture_size) )
+                        aV = (float(struct.unpack(TypeFormat.Byte, f.read(1))[0]) / int(height_texture_size) )
+                        
+                        #print("vt", aU, aV)
+                        uv_array.append([aU, aV])
+
+                        # vertex colours, add this later on!
+                        colour_r = int(((int.from_bytes(f.read(1), "little")  )))
+                        colour_g = int(((int.from_bytes(f.read(1), "little")  )))
+                        colour_b = int(((int.from_bytes(f.read(1), "little")  )))
+
+                        vert_colors[v] = [ colour_r, colour_g, colour_b ]
+                    else:
+                        f.read(2)
+                        
+                        # move to UVs
+                        aU = (float(struct.unpack(TypeFormat.Byte, f.read(1))[0]) / int(width_texture_size) )
+                        f.read(1) 
+                        aV = (float(struct.unpack(TypeFormat.Byte, f.read(1))[0]) / int(height_texture_size) )
+
+                        uv_array.append([aU, aV])
+                        
+                else:
+                    # vertex
+                    vtX = round(((struct.unpack(TypeFormat.SByte, f.read(1))[0])* scaleIToF), 4)
+                    vtY = round(((struct.unpack(TypeFormat.SByte, f.read(1))[0])* scaleIToF), 4)
+                    vtZ = round(((struct.unpack(TypeFormat.SByte, f.read(1))[0])* scaleIToF), 4)
+                    vert_array.append([vtX, vtY, vtZ])
+
                     # move to UVs
                     aU = (float(struct.unpack(TypeFormat.Byte, f.read(1))[0]) / int(width_texture_size) )
-                    aV = (float(struct.unpack(TypeFormat.Byte, f.read(1))[0]) / int(height_texture_size) )
-                    
-                    #print("vt", aU, aV)
+                    aV =  ((float(struct.unpack(TypeFormat.Byte, f.read(1))[0]) / int(height_texture_size) ) * -1 + 1.0)
+
                     uv_array.append([aU, aV])
 
-                    # vertex colours, add this later on!
                     colour_r = int(((int.from_bytes(f.read(1), "little")  )))
                     colour_g = int(((int.from_bytes(f.read(1), "little")  )))
                     colour_b = int(((int.from_bytes(f.read(1), "little")  )))
-
+                    
                     vert_colors[v] = [ colour_r, colour_g, colour_b ]
-                else:
-                    f.read(2)
-                    
-                    # move to UVs
-                    aU = (float(struct.unpack(TypeFormat.Byte, f.read(1))[0]) / int(width_texture_size) )
-                    f.read(1) 
-                    aV = (float(struct.unpack(TypeFormat.Byte, f.read(1))[0]) / int(height_texture_size) )
 
-                    uv_array.append([aU, aV])
-                    
-            
+                    # force vertex colors on for these types
+                    has_vertex_colours = True
+
+                                 
             mesh.vertices   = vert_array
             mesh.uvs        = uv_array
             mesh.offsets    = offset_array
@@ -130,7 +183,7 @@ def load(context,
         # make mesh
         vertices = mesh.vertices
         edges = []
-        faces = mesh.faces    
+        faces = mesh.faces
 
         n64_mesh = bpy.data.meshes.new('n64_mesh')
         n64_mesh.from_pydata(vertices, edges, faces)
@@ -139,12 +192,20 @@ def load(context,
         n64_object = bpy.data.objects.new(Path(filepath).stem, n64_mesh)
 
         # update meta data for export
-        n64_mesh['scale'] = mesh.scale
+
+        if mesh.type > 0:
+            n64_mesh['scale'] = mesh.scale
+        else:
+            n64_mesh['scale'] = 0
+
         n64_mesh['width'] = int(width_texture_size)
         n64_mesh['height'] = int(height_texture_size)
         n64_mesh['colors'] = has_vertex_colours
+        n64_mesh['internal_tex_size'] = mesh.texture_size
+        n64_mesh['vertex_influence'] = mesh.vertex_influence
 
         for face in n64_object.data.polygons:
+            face.use_smooth = True
             for vert_idx, loop_idx in zip(face.vertices, face.loop_indices):
                 n64_object.data.uv_layers.active.data[loop_idx].uv = (mesh.uvs[vert_idx][0],mesh.uvs[vert_idx][1])
                 #print("face idx: %i, vert idx: %i, uvs: %f, %f" % (face.index, vert_idx, uv_coords.x, uv_coords.y))
@@ -165,7 +226,11 @@ def load(context,
                 for polygon in n64_mesh.polygons:
                     for i, index in enumerate(polygon.vertices):
                         vertex_colour = [vert_colors[index][0] / 255, vert_colors[index][1] / 255, vert_colors[index][2] / 255, 1]
+                        #vertex_colour = [color_srgb_to_scene_linear(vert_colors[index][0] / 255), color_srgb_to_scene_linear(vert_colors[index][1] / 255),
+                        #                 color_srgb_to_scene_linear(vert_colors[index][2] / 255), 1]
 
+                        #print( vert_colors[index][0].decode('utf-8')+vert_colors[index][1].decode('utf-8')+vert_colors[index][2].decode('utf-8') )
+                    
                         loop_index = polygon.loop_indices[i]
                         n64_mesh.vertex_colors.active.data[loop_index].color = vertex_colour
                     
